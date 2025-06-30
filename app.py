@@ -1,126 +1,165 @@
-# app.py — Cinema Performance Command-Center  
-# (city filter removed + price-slider protected against single value / NaNs)
-# ============================================================================
+# app.py — Cinema Performance Command-Center ⭐️ 2025
+# A polished Streamlit cockpit with:
+# • K-Means customer segments  • Apriori association-rule mining
+# • Four predictive ML models (K-NN, Decision-Tree, Random-Forest, Gradient-Boost)
+# =============================================================================
 import streamlit as st, pandas as pd, numpy as np, plotly.express as px, plotly.graph_objects as go
 from pathlib import Path
 from datetime import timedelta
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
-from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, accuracy_score
+from sklearn.model_selection import train_test_split
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from mlxtend.frequent_patterns import apriori, association_rules
 
-# ─────────────────── 0. PAGE CONFIG / THEME ────────────────────
+# ─────────────────────────── 0. THEME ────────────────────────────
 st.set_page_config("🎬 Cinema Command-Center", "🎟️", "wide")
 st.markdown("""
 <style>
-html,body,[class*="css"]{font-family:Inter,sans-serif;}
-.kpi{background:#fafafa;border-radius:14px;padding:14px;box-shadow:0 2px 6px rgba(0,0,0,.05);}
-.kpi .v{font-size:1.7rem;font-weight:700;color:#E50914;text-align:center;}
-.kpi .l{font-size:.8rem;color:#555;text-align:center;margin-top:-4px;}
+html,body,[class*="css"]{font-family:'Inter',sans-serif;}
+.sidebar .sidebar-content{background:#f7f8fa;}
+.kpi{background:linear-gradient(135deg,#fff,#f1f3f6);border-radius:14px;padding:14px;box-shadow:0 4px 8px rgba(0,0,0,.04);}
+.kpi .v{font-size:1.9rem;font-weight:800;color:#E50914;text-align:center;margin:0;}
+.kpi .l{text-align:center;font-size:.8rem;color:#666;margin-top:-4px;}
+.metric-box{display:flex;align-items:center;gap:.5rem}
 div.js-plotly-plot .modebar{display:none !important;}
 </style>""", unsafe_allow_html=True)
 
-# ─────────────────── 1. COLUMN MAP (your headers) ──────────────
-MAP = {
-    "tickets_sold":  ["total_tickets"],
-    "ticket_price":  ["price_per_ticket"],
-    "capacity":      ["available_seats"],
-    "booking_date":  ["booking_date"],
-    "payment_status":["payment_status"],
-    "payment_method":["payment_method"],
-    "theatre_id":    ["theater_id"],
+# ─────────────────────────── 1. COLUMN MAP ──────────────────────
+MAP = {  # canonical : your header(s)
+    "tickets":  ["total_tickets"],
+    "price":    ["price_per_ticket"],
+    "capacity": ["available_seats"],
+    "bdate":    ["booking_date"],
+    "sdate":    ["show_date"],
+    "stime":    ["start_time"],
+    "theatre":  ["theater_id"],
+    "genre":    ["genre"],
 }
-NUM_DEFAULT = {"tickets_sold": 0, "ticket_price": 0.0, "capacity": 1}
+DEF_NUM = {"tickets":0,"price":0.0,"capacity":1}
 
-def map_cols(df: pd.DataFrame) -> pd.DataFrame:
-    lkp = {c.lower(): c for c in df.columns}
-    for canon, variants in MAP.items():
-        for v in variants:
-            if v.lower() in lkp:
-                df = df.rename(columns={lkp[v.lower()]: canon}); break
-    for c,d in NUM_DEFAULT.items(): df[c] = pd.to_numeric(df.get(c, d), errors="coerce").fillna(d)
-    # dates
-    for dt in ["booking_date","show_date","start_time"]: 
-        if dt in df: df[dt] = pd.to_datetime(df[dt], errors="coerce")
-    if {"show_date","start_time"} <= set(df.columns):
-        df["show_time"] = df["show_date"] + (df["start_time"] - df["start_time"].dt.normalize())
-    df["show_date_norm"] = pd.to_datetime(df.get("show_time")).dt.normalize()
-    return df
+def prep_df(raw: pd.DataFrame) -> pd.DataFrame:
+    # 1️⃣ rename
+    lower = {c.lower(): c for c in raw.columns}
+    for canon, alts in MAP.items():
+        for h in alts:
+            if h.lower() in lower: raw = raw.rename(columns={lower[h.lower()]: canon}); break
+    # 2️⃣ numeric defaults
+    for c,d in DEF_NUM.items(): raw[c] = pd.to_numeric(raw.get(c,d),errors="coerce").fillna(d)
+    # 3️⃣ dates
+    for dt in ["bdate","sdate","stime"]: 
+        if dt in raw: raw[dt] = pd.to_datetime(raw[dt],errors="coerce")
+    if {"sdate","stime"}<= set(raw):
+        raw["show_time"] = raw["sdate"] + (raw["stime"]-raw["stime"].dt.normalize())
+    raw["sales"] = raw["tickets"]*raw["price"]
+    raw["show_day"] = pd.to_datetime(raw.get("show_time")).dt.normalize()
+    return raw
 
-# ─────────────────── 2. LOAD CSV ───────────────────────────────
 @st.cache_data(show_spinner=True)
 def load(csv="BookMyShow_Combined_Clean_v2.csv"):
     if not Path(csv).is_file():
-        st.error(f"❌ **{csv}** not found. Upload then rerun."); st.stop()
-    return map_cols(pd.read_csv(csv))
+        st.error(f"CSV **{csv}** missing. Upload and rerun."); st.stop()
+    return prep_df(pd.read_csv(csv))
 
 df = load()
 
-# ─────────────────── 3. SIDEBAR (only date filter) ─────────────
+# ──────────────── 2. SIDEBAR (date filter only) ─────────────────
 with st.sidebar:
-    st.header("Filters")
-    if df["show_date_norm"].notna().any():
-        dmin,dmax = df["show_date_norm"].min().date(), df["show_date_norm"].max().date()
-        start,end = st.date_input("Show Date Range",(dmin,dmax))
-        mask_date = df["show_date_norm"].between(pd.Timestamp(start), pd.Timestamp(end))
-    else:
-        st.info("No valid show dates in file."); mask_date = pd.Series(True,index=df.index)
-df = df[mask_date].copy()
+    st.title("🎛 Filters")
+    if df["show_day"].notna().any():
+        dmin,dmax = df["show_day"].min().date(), df["show_day"].max().date()
+        s,e = st.date_input("Show Day", (dmin,dmax))
+        df = df[df["show_day"].between(pd.Timestamp(s), pd.Timestamp(e))]
 
-# ─────────────────── 4. SEGMENTATION (RFM) ─────────────────────
-snap = (df["booking_date"].max()+timedelta(days=1)) if "booking_date" in df else pd.Timestamp.today()
+# ──────────────── 3. K-MEANS SEGMENTS (5 clusters) ──────────────
+snap = (df["bdate"].max()+timedelta(days=1)) if "bdate" in df else pd.Timestamp.today()
 rfm = (df.groupby("user_id")
-         .agg(recency=("booking_date",lambda s:(snap-s.max()).days if s.notna().any() else 9999),
-              frequency=("tickets_sold","sum"),
-              monetary=("ticket_price","sum"))
+         .agg(rec=("bdate",lambda s:(snap-s.max()).days if s.notna().any() else 9999),
+              freq=("tickets","sum"), mon=("sales","sum"))
          .reset_index())
 if len(rfm):
-    X = StandardScaler().fit_transform(rfm[["recency","frequency","monetary"]])
-    rfm["segment"] = KMeans(4,random_state=42,n_init="auto").fit_predict(X)
-    sil = silhouette_score(X, rfm.segment)
-else: sil = 0
-df = df.merge(rfm[["user_id","segment"]],how="left",on="user_id")
+    X = StandardScaler().fit_transform(rfm[["rec","freq","mon"]])
+    km = KMeans(5,random_state=42,n_init="auto").fit(X)
+    rfm["cluster"] = km.labels_
+    sil = silhouette_score(X, km.labels_)
+else: sil = 0; rfm["cluster"]=[]
 
-# ─────────────────── 5. KPI STRIP ──────────────────────────────
+label_logic = {0:"Low Value",1:"Mid Value",2:"High Value",3:"New",4:"One-Timer"}
+rfm["segment"] = rfm["cluster"].map(label_logic)
+df = df.merge(rfm[["user_id","segment"]],on="user_id",how="left")
+
+# ──────────────── 4. ASSOCIATION RULES (genre) ──────────────────
+@st.cache_data(show_spinner=True)
+def mine_rules(tdf: pd.DataFrame):
+    if "genre" not in tdf: return pd.DataFrame()
+    basket = (tdf[["booking_id","genre"]].dropna().drop_duplicates()
+                .assign(v=1).pivot_table(index="booking_id", columns="genre", values="v", fill_value=0))
+    freq = apriori(basket,min_support=0.02,use_colnames=True)
+    if freq.empty: return pd.DataFrame()
+    return association_rules(freq,metric="confidence",min_threshold=0.3)\
+            .sort_values("lift",ascending=False)
+
+rules = mine_rules(df)
+
+# ──────────────── 5. KPI STRIP ──────────────────────────────────
 def kpi(v,l): st.markdown(f'<div class="kpi"><p class="v">{v}</p><p class="l">{l}</p></div>',unsafe_allow_html=True)
-a,b,c=st.columns(3)
-with a:kpi(f"{df.tickets_sold.sum():,}","Tickets Sold")
-with b:kpi(f"{(1-df.tickets_sold.sum()/df.capacity.sum())*100:,.1f}%","Vacancy")
-with c:kpi(f"{sil:.2f}","Segm. Silhouette")
+a,b,c = st.columns(3)
+with a:kpi(f"{df.tickets.sum():,}","Tickets Sold")
+with b:kpi(f"{(1-df.tickets.sum()/df.capacity.sum())*100:,.1f}%","Vacancy")
+with c:kpi(f"{sil:.2f}","Silhouette")
 
-# ─────────────────── 6. PRICE MODEL (guarded) ──────────────────
-price_vals = df["ticket_price"].dropna().unique()
-price_ready = len(price_vals) > 1
-if price_ready:
-    reg = GradientBoostingRegressor(random_state=42).fit(df[["ticket_price"]], df["tickets_sold"])
-    p_min,p_max = price_vals.min(), price_vals.max()
-    x_curve = np.linspace(p_min, p_max, 30); y_curve = reg.predict(x_curve.reshape(-1,1))
+# ──────────────── 6. TABS LAYOUT ────────────────────────────────
+tab_cap, tab_seg, tab_ml = st.tabs(["📊 Capacity","🧩 Segments","🤖 Predict"])
 
-# ─────────────────── 7. DASHBOARD ──────────────────────────────
-tab1,tab2 = st.tabs(["📊 Capacity","💰 Pricing"])
-
-with tab1:
+# Capacity
+with tab_cap:
     st.subheader("Hourly Seat Occupancy")
     if df["show_time"].notna().any():
-        hourly=(df.assign(hour=df.show_time.dt.hour)
-                  .groupby("hour").agg(occ=("tickets_sold","sum"),cap=("capacity","sum"))
-                  .assign(occ_pct=lambda x:x.occ/x.cap).reset_index())
-        st.plotly_chart(px.bar(hourly,x="hour",y="occ_pct",labels={"occ_pct":"Occupancy %"},height=380),
-                        use_container_width=True)
-    else:
-        st.info("No show_time data to plot occupancy.")
+        hourly = (df.assign(h=df.show_time.dt.hour)
+                    .groupby("h").agg(o=("tickets","sum"),c=("capacity","sum"))
+                    .assign(occ=lambda x:x.o/x.c).reset_index())
+        st.plotly_chart(px.bar(hourly,x="h",y="occ",labels={"occ":"Occupancy %"},height=380),use_container_width=True)
+    else: st.info("No `show_time` data.")
 
-with tab2:
-    st.subheader("Price Simulator")
-    if price_ready:
-        sel = st.slider("Ticket Price (₹)", int(p_min), int(p_max), int((p_min+p_max)//2), step=5)
-        st.metric("Predicted Tickets", f"{reg.predict([[sel]])[0]:,.0f}")
-        fig = go.Figure(go.Scatter(x=x_curve, y=y_curve, mode="lines"))
-        fig.update_layout(xaxis_title="Price (₹)", yaxis_title="Predicted Tickets", height=360)
-        st.plotly_chart(fig, use_container_width=True)
+# Segments
+with tab_seg:
+    st.subheader("Customer Segments (K-Means k=5)")
+    seg_cnt = rfm.segment.value_counts().reset_index(); seg_cnt.columns=["segment","users"]
+    st.plotly_chart(px.bar(seg_cnt,x="segment",y="users",text="users",height=350),use_container_width=True)
+    st.dataframe(seg_cnt,use_container_width=True)
+    st.divider(); st.subheader("Top Genre → Genre Rules")
+    if rules.empty: st.info("Not enough genre variety.")
     else:
-        st.info("Need >1 unique ticket price to fit demand model.")
+        st.dataframe(rules[["antecedents","consequents","support","confidence","lift"]].head(10)
+                     .style.format({"support":"{:.1%}","confidence":"{:.1%}","lift":"{:.2f}"}),
+                     use_container_width=True)
 
-# ─────────────────── 8. FOOTER ─────────────────────────────────
-st.markdown("<center style='color:#888;font-size:.75rem'>© 2025 • Clean build — city removed & slider safeguarded ✅</center>",
-            unsafe_allow_html=True)
+# Predict
+with tab_ml:
+    st.subheader("Predict High-Value vs Other Customers")
+    # target = 1 if segment == High Value
+    mdl_df = rfm.copy()
+    mdl_df["target"] = (mdl_df.segment=="High Value").astype(int)
+    X = mdl_df[["rec","freq","mon"]]; y = mdl_df["target"]
+    if y.nunique() < 2:
+        st.info("Need both classes to train models."); st.stop()
+    Xtr,Xte,ytr,yte = train_test_split(X,y,test_size=.3,random_state=42,stratify=y)
+
+    MODELS = {
+        "K-NN (k=5)":KNeighborsClassifier(5),
+        "Decision-Tree":DecisionTreeClassifier(max_depth=4,random_state=42),
+        "Random-Forest":RandomForestClassifier(n_estimators=200,random_state=42),
+        "Gradient-Boost":GradientBoostingClassifier(random_state=42),
+    }
+    results=[]
+    for name,model in MODELS.items():
+        model.fit(Xtr,ytr); acc=accuracy_score(yte,model.predict(Xte))
+        results.append({"Model":name,"Accuracy":f"{acc:.2%}"})
+    st.table(pd.DataFrame(results))
+    st.caption("Predictive baseline: identify likely high-value customers for targeted retention.")
+
+# Footer
+st.markdown("<center style='font-size:.75rem;color:#888'>© 2025 • Enhanced dashboard — segments, rules, ML insights ⚡️</center>",unsafe_allow_html=True)
