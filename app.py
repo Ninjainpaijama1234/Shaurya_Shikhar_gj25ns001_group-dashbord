@@ -1,4 +1,4 @@
-# app.py — Cinema Performance Command-Center (bullet-proof build)
+# app.py — Cinema Performance Command-Center (date-safe edition)
 # =================================================================
 import streamlit as st
 import pandas as pd
@@ -12,7 +12,7 @@ from sklearn.cluster import KMeans
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import silhouette_score
 
-# ────────────────────────── CONFIG & THEME ───────────────────────
+# ───────────────────────── CONFIG & THEME ────────────────────────
 st.set_page_config("🎬 Cinema Command-Center", "🎟️", "wide", initial_sidebar_state="expanded")
 st.markdown(
     """
@@ -28,26 +28,22 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ──────────────────────── SAFE COLUMN DEFAULTS ───────────────────
+# ───────────────────── SAFE COLUMN DEFAULTS ──────────────────────
 NUM_DEFAULT = {"tickets_sold": 0, "ticket_price": 0.0, "capacity": 1}
 CAT_DEFAULT = {
-    "city": "Unknown", "payment_method": "Unknown",
-    "payment_status": "Success", "theatre_id": "T-0",
-    "show_id": "S-0", "user_id": "U-0",
+    "city": "Unknown", "payment_method": "Unknown", "payment_status": "Success",
+    "theatre_id": "T-0", "show_id": "S-0", "user_id": "U-0",
 }
 
 def guarantee_cols(df: pd.DataFrame) -> pd.DataFrame:
     for c, d in NUM_DEFAULT.items():
-        if c not in df.columns:
-            df[c] = d
+        if c not in df: df[c] = d
     for c, d in CAT_DEFAULT.items():
-        if c not in df.columns:
-            df[c] = d
-    # date parsing
+        if c not in df: df[c] = d
+    # robust date parsing
     for c in ["booking_date", "show_time"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
-    if "show_time" in df.columns and "show_date" not in df.columns:
+        if c in df: df[c] = pd.to_datetime(df[c], errors="coerce")
+    if "show_time" in df and "show_date" not in df:
         df["show_date"] = df["show_time"].dt.date
     return df
 
@@ -55,7 +51,7 @@ def guarantee_cols(df: pd.DataFrame) -> pd.DataFrame:
 @st.cache_data(show_spinner=True)
 def load(csv="BookMyShow_Combined_Clean_v2.csv") -> pd.DataFrame:
     if not Path(csv).is_file():
-        st.error(f"File **{csv}** not found. Upload it & press *R* to reload.")
+        st.error(f"**{csv}** not found. Upload it → press **R** to reload.")
         st.stop()
     return guarantee_cols(pd.read_csv(csv))
 
@@ -65,15 +61,14 @@ df = load()
 with st.sidebar:
     st.header("Filters")
 
-    # date range widget only if we have valid show dates
-    if "show_date" in df.columns and df["show_date"].notna().any():
+    # Handle dates safely (even if NaT, numpy.datetime64, or already date)
+    if "show_date" in df and df["show_date"].notna().any():
         valid_dates = df["show_date"].dropna()
-        _dmin, _dmax = valid_dates.min(), valid_dates.max()
-        # cast to python date safely
-        dmin = _dmin if isinstance(_dmin, date) else _dmin.date()
-        dmax = _dmax if isinstance(_dmax, date) else _dmax.date()
-        date_start, date_end = st.date_input("Show Date Range", (dmin, dmax))
-        mask_date = df["show_date"].between(date_start, date_end)
+        dmin = pd.to_datetime(valid_dates.min()).date()
+        dmax = pd.to_datetime(valid_dates.max()).date()
+        date_range = st.date_input("Show Date Range", (dmin, dmax))  # returns tuple
+        start_date, end_date = date_range if isinstance(date_range, (list, tuple)) else (dmin, dmax)
+        mask_date = df["show_date"].between(start_date, end_date)
     else:
         st.info("No valid `show_date` column – date filter disabled.")
         mask_date = pd.Series(True, index=df.index)
@@ -84,7 +79,7 @@ with st.sidebar:
 df = df[mask_date & mask_city].copy()
 
 # ───────────────────────── RFM & SEGMENTS ────────────────────────
-SNAP = df["booking_date"].max() + timedelta(days=1) if "booking_date" in df else pd.Timestamp.today()
+SNAP = (df["booking_date"].max() + timedelta(days=1)) if "booking_date" in df else pd.Timestamp.today()
 rfm = (
     df.groupby("user_id")
       .agg(recency=("booking_date", lambda s: (SNAP - s.max()).days if s.notna().any() else 9999),
@@ -102,23 +97,23 @@ def kpi(val, lbl):
     st.markdown(f'<div class="kpi"><span class="v">{val}</span><span class="l">{lbl}</span></div>', unsafe_allow_html=True)
 
 c1,c2,c3 = st.columns(3)
-with c1: kpi(f"{df.tickets_sold.sum():,.0f}", "Tickets Sold")
+with c1: kpi(f"{df.tickets_sold.sum():,}", "Tickets Sold")
 with c2: kpi(f"{(1-df.tickets_sold.sum()/df.capacity.sum())*100:,.1f} %", "Vacancy Rate")
 with c3: kpi(f"{sil:.2f}", "Segm. Silhouette")
 
 # ───────────────────────── PRICE DEMAND MODEL ────────────────────
-price_model_ready = df["ticket_price"].nunique() > 1
-if price_model_ready:
+price_ready = df["ticket_price"].nunique() > 1
+if price_ready:
     reg = GradientBoostingRegressor().fit(df[["ticket_price"]], df["tickets_sold"])
-    curve_x = np.arange(100,501,10)
-    curve_y = reg.predict(curve_x.reshape(-1,1))
+    curve_x = np.arange(100, 501, 10)
+    curve_y = reg.predict(curve_x.reshape(-1, 1))
 
 # ───────────────────────── TABS ──────────────────────────────────
 tab_cap, tab_price = st.tabs(["📊 Capacity", "💰 Pricing"])
 
 with tab_cap:
     st.subheader("Hourly Seat Occupancy")
-    if "show_time" in df.columns:
+    if "show_time" in df:
         hourly = (
             df.assign(hour=df["show_time"].dt.hour)
               .groupby("hour")
@@ -126,24 +121,26 @@ with tab_cap:
               .assign(occ_pct=lambda x: x.occ/x.cap)
               .reset_index()
         )
-        st.plotly_chart(px.bar(hourly, x="hour", y="occ_pct", labels={"occ_pct":"Occupancy %"}), use_container_width=True)
+        st.plotly_chart(
+            px.bar(hourly, x="hour", y="occ_pct", labels={"occ_pct":"Occupancy %"}, height=380),
+            use_container_width=True,
+        )
     else:
-        st.warning("`show_time` column missing – cannot plot occupancy.")
+        st.warning("Column `show_time` missing – occupancy chart skipped.")
 
 with tab_price:
     st.subheader("Price Simulator")
     price_sel = st.slider("Ticket Price (₹)", 100, 500, 250, 25)
-    if price_model_ready:
-        pred = reg.predict([[price_sel]])[0]
-        st.metric("Predicted Tickets", f"{pred:,.0f}")
+    if price_ready:
+        st.metric("Predicted Tickets", f"{reg.predict([[price_sel]])[0]:,.0f}")
         fig = go.Figure(go.Scatter(x=curve_x, y=curve_y, mode="lines"))
-        fig.update_layout(xaxis_title="Price", yaxis_title="Predicted Tickets", height=350)
+        fig.update_layout(xaxis_title="Price (₹)", yaxis_title="Predicted Tickets", height=360)
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Price variation insufficient – demand model skipped.")
+        st.info("Insufficient price variation — demand model skipped.")
 
 # ───────────────────────── FOOTER ────────────────────────────────
 st.markdown(
-    "<center style='color:#888;font-size:.75rem'>© 2025 • Zero-error build deployed.</center>",
+    "<center style='color:#888;font-size:.75rem'>© 2025 • Date-safe build — no more `.date()` errors 🚀</center>",
     unsafe_allow_html=True,
 )
