@@ -8,3 +8,4 @@ lifetimes
 prophet
 orjson
 keras
+tensorflow
