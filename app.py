@@ -1,5 +1,3 @@
-# app.py - Streamlit Dashboard with Theatre Utilization Clustering
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -20,7 +18,7 @@ st.set_page_config(page_title="🎬 BookMyShow Dashboard", layout="wide")
 def load_data():
     df = pd.read_csv("BookMyShow_Combined_Clean_v2.csv", parse_dates=["booking_date", "payment_date", "show_date"], dayfirst=True)
     df["Monetary"] = df["price_per_ticket"] * df["total_tickets"]
-    df["occupancy"] = df["total_tickets"] / (df["total_tickets"] + df["available_seats"])
+    df["occupancy"] = df["total_tickets"] / (df["total_tickets"] + df["available_seats"] + 1e-5)
     df["hour"] = pd.to_datetime(df["start_time"]).dt.hour
     return df
 
@@ -134,20 +132,48 @@ with tabs[5]:
 # --- 🎭 Theatre Utilization Clustering ---
 with tabs[6]:
     st.header("🎭 Theatre Utilization Clustering")
+
+    cluster_count = st.slider("Select number of clusters", min_value=2, max_value=6, value=3, step=1)
+
     usage_df = df_filtered.groupby(["theater_id", "hour"]).agg({
         "total_tickets": "sum",
         "available_seats": "sum"
     }).reset_index()
     usage_df["occupancy"] = usage_df["total_tickets"] / (usage_df["total_tickets"] + usage_df["available_seats"] + 1e-5)
 
-    X = usage_df[["occupancy"]]
-    kmeans = KMeans(n_clusters=3, random_state=0).fit(X)
+    kmeans = KMeans(n_clusters=cluster_count, random_state=0).fit(usage_df[["occupancy"]])
     usage_df["cluster"] = kmeans.labels_
 
-    fig = px.scatter(usage_df, x="hour", y="occupancy", color="cluster", hover_data=["theater_id"], title="Usage Clustering by Time & Theatre")
+    fig = px.scatter(
+        usage_df, x="hour", y="occupancy", color="cluster", hover_data=["theater_id"],
+        title="Usage Clustering by Time & Theatre",
+        labels={"hour": "Hour of Day", "occupancy": "Occupancy Rate"}
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     heatmap_data = usage_df.pivot_table(index="theater_id", columns="hour", values="occupancy")
-    fig_heat = px.imshow(heatmap_data, labels=dict(x="Hour", y="Theatre", color="Occupancy"), title="🔥 Heatmap of Theatre Usage")
+    fig_heat = px.imshow(
+        heatmap_data,
+        labels=dict(x="Hour", y="Theatre", color="Occupancy"),
+        title="🔥 Heatmap of Theatre Usage"
+    )
     st.plotly_chart(fig_heat, use_container_width=True)
-    st.dataframe(usage_df.sort_values(by="occupancy", ascending=True).head(10))
+
+    st.subheader("📌 Cluster Insights")
+    cluster_summary = usage_df.groupby("cluster")["occupancy"].agg(["count", "mean", "min", "max"]).reset_index()
+    cluster_summary.columns = ["Cluster", "Shows", "Avg Occupancy", "Min", "Max"]
+    st.dataframe(cluster_summary)
+
+    lowest_cluster = cluster_summary.sort_values(by="Avg Occupancy").iloc[0]["Cluster"]
+    underused = usage_df[usage_df["cluster"] == lowest_cluster].sort_values(by="occupancy")
+
+    st.subheader(f"⬇️ Underused Cluster: {lowest_cluster}")
+    st.dataframe(underused.head(10))
+
+    csv = underused.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download Underused Shows as CSV",
+        data=csv,
+        file_name="underused_theatre_clusters.csv",
+        mime="text/csv"
+    )
