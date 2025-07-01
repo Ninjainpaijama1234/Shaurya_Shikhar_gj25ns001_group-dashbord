@@ -3,9 +3,3 @@ pandas
 numpy
 scikit-learn
 plotly
-mlxtend
-lifetimes
-prophet
-orjson
-keras
-tensorflow
