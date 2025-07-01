@@ -7,3 +7,10 @@ mlxtend
 lifetimes
 prophet
 orjson
+streamlit
+pandas
+numpy
+scikit-learn
+plotly
+keras
+tensorflow
